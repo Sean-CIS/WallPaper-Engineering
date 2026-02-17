@@ -3,15 +3,15 @@ Windows desktop wallpaper embedding.
 
 Uses the Win32 API to embed a pygame window behind the desktop icons,
 turning it into a live animated wallpaper — the same technique used by
-Wallpaper Engine.
+Wallpaper Engine and Lively Wallpaper.
 
 How it works:
   1. Find the "Progman" window (the shell desktop).
-  2. Send it message 0x052C to spawn a hidden WorkerW layer.
-  3. Enumerate top-level windows to locate the WorkerW that sits
-     between Progman and the icon layer.
+  2. Send it message 0x052C to spawn a WorkerW layer.
+  3. Enumerate top-level windows to find the empty WorkerW that sits
+     below the icon layer but above Progman's static wallpaper.
   4. Re-parent our pygame window into that WorkerW so it renders
-     as the desktop background.
+     behind desktop icons but above the static wallpaper.
 """
 
 import sys
@@ -72,7 +72,7 @@ EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPAR
 def _get_window_long(hwnd, index):
     """Get window long value — uses Ptr variant on 64-bit."""
     if _is_64bit:
-        user32.GetWindowLongPtrW.restype = ctypes.c_long_long
+        user32.GetWindowLongPtrW.restype = ctypes.c_longlong
         user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
         return user32.GetWindowLongPtrW(hwnd, index)
     else:
@@ -84,8 +84,8 @@ def _get_window_long(hwnd, index):
 def _set_window_long(hwnd, index, value):
     """Set window long value — uses Ptr variant on 64-bit."""
     if _is_64bit:
-        user32.SetWindowLongPtrW.restype = ctypes.c_long_long
-        user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long_long]
+        user32.SetWindowLongPtrW.restype = ctypes.c_longlong
+        user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_longlong]
         return user32.SetWindowLongPtrW(hwnd, index, value)
     else:
         user32.SetWindowLongW.restype = wintypes.LONG
@@ -93,17 +93,28 @@ def _set_window_long(hwnd, index, value):
         return user32.SetWindowLongW(hwnd, index, value)
 
 
-def _find_worker_w_enum():
+def _find_wallpaper_worker_w():
     """
-    Enumerate all top-level windows to find the WorkerW that contains
-    a SHELLDLL_DefView child — then grab the WorkerW *after* it.
+    Enumerate top-level windows to find the WorkerW we should parent into.
+
+    After the 0x052C message, the desktop Z-order (top to bottom) is:
+
+        WorkerW  (contains SHELLDLL_DefView — the icon layer)
+        WorkerW  (empty — sits BELOW icons, ABOVE Progman's wallpaper)
+        Progman  (bottom — paints the static wallpaper)
+
+    We find the WorkerW that holds SHELLDLL_DefView, then grab its next
+    sibling WorkerW. That empty sibling is the correct parent for our
+    pygame window — anything rendered inside it appears behind the desktop
+    icons but above the static wallpaper.  This is the technique used by
+    Lively Wallpaper, Wallpaper Engine, and every other live wallpaper app.
     """
     found = [None]
 
     def callback(hwnd, lparam):
         shell_view = user32.FindWindowExW(hwnd, None, "SHELLDLL_DefView", None)
         if shell_view:
-            # The WorkerW we want is the NEXT sibling after this one
+            # The empty WorkerW is the NEXT sibling after this one
             found[0] = user32.FindWindowExW(None, hwnd, "WorkerW", None)
         return True  # keep enumerating
 
@@ -140,14 +151,10 @@ def find_worker_w():
     # Retry a few times — WorkerW can take a moment to appear
     worker_w = None
     for attempt in range(5):
-        worker_w = _find_worker_w_enum()
+        worker_w = _find_wallpaper_worker_w()
         if worker_w:
             break
         time.sleep(0.2)
-
-    if not worker_w:
-        # Fallback: try rendering directly into Progman's first WorkerW child
-        worker_w = user32.FindWindowExW(progman, None, "WorkerW", None)
 
     if not worker_w:
         print("[desktop] ERROR: Could not find WorkerW window after retries")
@@ -173,7 +180,10 @@ def get_worker_w_size():
 
 def embed_pygame_window(pygame_hwnd, worker_w, width, height):
     """
-    Embed a pygame window into the desktop WorkerW layer.
+    Embed a pygame window as the desktop wallpaper behind icons.
+
+    No windows need to be hidden — the empty WorkerW is already
+    positioned correctly in the Z-order.
 
     Args:
         pygame_hwnd: The HWND of the pygame window.
@@ -193,19 +203,21 @@ def embed_pygame_window(pygame_hwnd, worker_w, width, height):
     style |= WS_CHILD | WS_VISIBLE
     _set_window_long(pygame_hwnd, GWLP_STYLE, style)
 
-    # Remove tool-window extended style
+    # Strip extended styles that can interfere with rendering
     ex_style = _get_window_long(pygame_hwnd, GWLP_EXSTYLE)
+    ex_style &= ~(0x00020000 | 0x00000200 | 0x00000100 | 0x00080000 | 0x00000001)
+    # WS_EX_DLGMODALFRAME | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE | WS_EX_LAYERED | WS_EX_COMPOSITED
     ex_style |= WS_EX_TOOLWINDOW
     _set_window_long(pygame_hwnd, GWLP_EXSTYLE, ex_style)
 
-    # Re-parent into the WorkerW
+    # Parent into the empty WorkerW (behind icons, above wallpaper)
     user32.SetParent(pygame_hwnd, worker_w)
 
     # Resize to fill the desktop
     user32.SetWindowPos(pygame_hwnd, None, 0, 0, width, height,
                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW)
 
-    print(f"[desktop] Embedded into desktop ({width}x{height})")
+    print(f"[desktop] Embedded into WorkerW ({width}x{height})")
     return True
 
 

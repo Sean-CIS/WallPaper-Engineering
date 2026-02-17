@@ -95,7 +95,7 @@ def _can_embed_desktop():
     if sys.platform != "win32":
         return False
     try:
-        from wallpaper_engine.desktop import find_worker_w
+        from wallpaper_engine.desktop import embed_pygame_window
         return True
     except ImportError:
         return False
