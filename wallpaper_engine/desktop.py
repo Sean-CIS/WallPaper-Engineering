@@ -95,34 +95,46 @@ def _set_window_long(hwnd, index, value):
 
 def _find_wallpaper_worker_w():
     """
-    Enumerate top-level windows to find the WorkerW we should parent into.
+    Find the WorkerW we should parent into.
 
-    After the 0x052C message, the desktop Z-order (top to bottom) is:
+    There are two known desktop layouts depending on Windows version:
 
-        WorkerW  (contains SHELLDLL_DefView — the icon layer)
-        WorkerW  (empty — sits BELOW icons, ABOVE Progman's wallpaper)
-        Progman  (bottom — paints the static wallpaper)
+    Layout A (Win10, some Win11):
+        Top-level WorkerW  (contains SHELLDLL_DefView — icons)
+        Top-level WorkerW  (empty — our target, below icons)
+        Progman            (bottom)
 
-    We find the WorkerW that holds SHELLDLL_DefView, then grab its next
-    sibling WorkerW. That empty sibling is the correct parent for our
-    pygame window — anything rendered inside it appears behind the desktop
-    icons but above the static wallpaper.  This is the technique used by
-    Lively Wallpaper, Wallpaper Engine, and every other live wallpaper app.
+    Layout B (Win11 24H2+):
+        Progman
+          ├── SHELLDLL_DefView  (icons — stays inside Progman)
+          └── WorkerW           (our target — child of Progman)
+
+    We try Layout A first (EnumWindows for top-level sibling), then
+    fall back to Layout B (WorkerW child of Progman).
     """
+    # --- Layout A: top-level sibling ---
     found = [None]
 
     def callback(hwnd, lparam):
         shell_view = user32.FindWindowExW(hwnd, None, "SHELLDLL_DefView", None)
         if shell_view:
-            # The empty WorkerW is the NEXT sibling after this one
             found[0] = user32.FindWindowExW(None, hwnd, "WorkerW", None)
-        return True  # keep enumerating
+        return True
 
-    # IMPORTANT: store the callback in a variable so it doesn't get
-    # garbage-collected while EnumWindows is still calling it
     cb = EnumWindowsProc(callback)
     user32.EnumWindows(cb, 0)
-    return found[0]
+
+    if found[0]:
+        return found[0]
+
+    # --- Layout B: WorkerW is a child of Progman ---
+    progman = user32.FindWindowW("Progman", None)
+    if progman:
+        worker_w = user32.FindWindowExW(progman, None, "WorkerW", None)
+        if worker_w:
+            return worker_w
+
+    return None
 
 
 def find_worker_w():
@@ -130,24 +142,22 @@ def find_worker_w():
     Find (or create) the WorkerW window that sits behind the desktop icons.
 
     Sends the undocumented 0x052C message to Progman to spawn the WorkerW,
-    then enumerates windows to find it. Retries a few times if needed since
-    the WorkerW doesn't always appear instantly.
+    then searches for it using both known Windows layouts. Retries a few
+    times if needed since the WorkerW doesn't always appear instantly.
 
     Returns the HWND of the target WorkerW, or None on failure.
     """
-    # Step 1: Find Progman
     progman = user32.FindWindowW("Progman", None)
     if not progman:
         print("[desktop] ERROR: Could not find Progman window")
         return None
 
-    # Step 2: Send the undocumented 0x052C message to spawn WorkerW
+    # Send the undocumented 0x052C message to spawn WorkerW
     # Send it twice — some Windows versions need that
     result = wintypes.DWORD(0)
     SendMessageTimeoutW(progman, 0x052C, 0xD, 0, SMTO_NORMAL, 1000, ctypes.byref(result))
     SendMessageTimeoutW(progman, 0x052C, 0xD, 1, SMTO_NORMAL, 1000, ctypes.byref(result))
 
-    # Step 3: Enumerate windows to find the right WorkerW
     # Retry a few times — WorkerW can take a moment to appear
     worker_w = None
     for attempt in range(5):
@@ -157,7 +167,7 @@ def find_worker_w():
         time.sleep(0.2)
 
     if not worker_w:
-        print("[desktop] ERROR: Could not find WorkerW window after retries")
+        print("[desktop] ERROR: Could not find WorkerW after retries")
         return None
 
     return worker_w
