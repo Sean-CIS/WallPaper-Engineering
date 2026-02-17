@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-WallPaper Engine - Animated Wallpapers with Music
+WallPaper Engine - Animated Desktop Wallpapers with Music
 
-A Python-based animated wallpaper player with integrated music playback.
-Supports animated GIFs, static images with parallax, and procedural
-shader-like effects that react to music.
+A Python-based animated wallpaper that renders BEHIND your desktop icons,
+just like Wallpaper Engine. On Windows it uses the Win32 WorkerW trick
+to embed the pygame surface into the desktop layer.
 
 Controls:
     SPACE       - Play / Pause music
@@ -14,17 +14,14 @@ Controls:
     - / _       - Volume down
     E           - Open effects menu
     1-5         - Quick select effect
-    F           - Toggle fullscreen
     H           - Toggle HUD overlay
-    L           - Load wallpaper file
     Q / ESC     - Quit
 
 Usage:
-    python main.py                          # Start with default procedural effect
-    python main.py --wallpaper path.gif     # Start with a specific wallpaper
-    python main.py --music ~/Music          # Specify music folder
-    python main.py --effect aurora          # Start with specific effect
-    python main.py --width 1920 --height 1080  # Custom resolution
+    python main.py                          # Desktop wallpaper (default)
+    python main.py --window                 # Regular foreground window
+    python main.py --wallpaper path.gif     # Desktop wallpaper with a GIF
+    python main.py --effect aurora          # Desktop wallpaper with aurora effect
 """
 
 import os
@@ -39,7 +36,7 @@ from wallpaper_engine.ui import HUD
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="WallPaper Engine - Animated wallpapers with music",
+        description="WallPaper Engine - Animated desktop wallpapers with music",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Effects:
@@ -50,9 +47,11 @@ Effects:
   matrix          Digital rain (Matrix style)
 
 Examples:
-  python main.py --effect aurora
-  python main.py --wallpaper assets/wallpapers/scene.gif --music assets/music/
-  python main.py --width 1920 --height 1080 --fullscreen
+  python main.py                              # Desktop wallpaper mode (default)
+  python main.py --window                     # Regular window mode
+  python main.py --effect matrix              # Matrix rain on desktop
+  python main.py --wallpaper scene.gif        # GIF on desktop
+  python main.py --window --width 1280 --height 720   # Windowed at custom size
         """
     )
     parser.add_argument("--wallpaper", "-w", type=str, default=None,
@@ -63,16 +62,29 @@ Examples:
                         choices=["wave", "aurora", "particles", "gradient_pulse", "matrix"],
                         help="Procedural effect to use (default: aurora)")
     parser.add_argument("--width", type=int, default=1280,
-                        help="Window width (default: 1280)")
+                        help="Window width in --window mode (default: 1280)")
     parser.add_argument("--height", type=int, default=720,
-                        help="Window height (default: 720)")
+                        help="Window height in --window mode (default: 720)")
     parser.add_argument("--fps", type=int, default=30,
                         help="Target FPS (default: 30)")
+    parser.add_argument("--window", action="store_true",
+                        help="Run as a regular window instead of a desktop wallpaper")
     parser.add_argument("--fullscreen", "-f", action="store_true",
-                        help="Start in fullscreen mode")
+                        help="Fullscreen window (only in --window mode)")
     parser.add_argument("--no-hud", action="store_true",
                         help="Start with HUD hidden")
     return parser.parse_args()
+
+
+def _can_embed_desktop():
+    """Check if we're on Windows and can do the desktop embed."""
+    if sys.platform != "win32":
+        return False
+    try:
+        from wallpaper_engine.desktop import find_worker_w
+        return True
+    except ImportError:
+        return False
 
 
 class WallpaperEngine:
@@ -83,20 +95,19 @@ class WallpaperEngine:
         pygame.display.set_caption("WallPaper Engine")
 
         self.target_fps = args.fps
-        self.fullscreen = args.fullscreen
+        self.desktop_mode = False
+        self.pygame_hwnd = None
 
-        # Set up display
-        flags = pygame.DOUBLEBUF | pygame.HWSURFACE
-        if self.fullscreen:
-            info = pygame.display.Info()
-            self.width, self.height = info.current_w, info.current_h
-            flags |= pygame.FULLSCREEN
+        # Decide mode: desktop wallpaper (default on Windows) or regular window
+        use_desktop = not args.window and _can_embed_desktop()
+
+        if use_desktop:
+            self._init_desktop_mode()
+        elif args.fullscreen:
+            self._init_fullscreen_mode()
         else:
-            self.width = args.width
-            self.height = args.height
-            flags |= pygame.RESIZABLE
+            self._init_window_mode(args.width, args.height)
 
-        self.screen = pygame.display.set_mode((self.width, self.height), flags)
         self.clock = pygame.time.Clock()
 
         # Initialize subsystems
@@ -120,16 +131,56 @@ class WallpaperEngine:
 
         self.running = True
 
+    def _init_desktop_mode(self):
+        """Set up the window and embed it as the desktop wallpaper."""
+        from wallpaper_engine.desktop import get_desktop_resolution, embed_pygame_window
+
+        self.width, self.height = get_desktop_resolution()
+
+        # Create a borderless window at desktop resolution
+        os.environ["SDL_VIDEO_WINDOW_POS"] = "0,0"
+        flags = pygame.NOFRAME | pygame.DOUBLEBUF | pygame.HWSURFACE
+        self.screen = pygame.display.set_mode((self.width, self.height), flags)
+
+        # Get the pygame window handle and embed it behind icons
+        wm_info = pygame.display.get_wm_info()
+        self.pygame_hwnd = wm_info.get("window")
+
+        if self.pygame_hwnd and embed_pygame_window(self.pygame_hwnd):
+            self.desktop_mode = True
+            print(f"[wallpaper] Desktop mode active ({self.width}x{self.height})")
+        else:
+            print("[wallpaper] WARNING: Desktop embed failed, falling back to borderless window")
+            self.desktop_mode = False
+
+    def _init_fullscreen_mode(self):
+        """Set up a regular fullscreen window."""
+        info = pygame.display.Info()
+        self.width, self.height = info.current_w, info.current_h
+        flags = pygame.FULLSCREEN | pygame.DOUBLEBUF | pygame.HWSURFACE
+        self.screen = pygame.display.set_mode((self.width, self.height), flags)
+
+    def _init_window_mode(self, width, height):
+        """Set up a regular resizable window."""
+        self.width = width
+        self.height = height
+        flags = pygame.RESIZABLE | pygame.DOUBLEBUF | pygame.HWSURFACE
+        self.screen = pygame.display.set_mode((self.width, self.height), flags)
+
     def run(self):
         """Main application loop."""
+        mode_str = "DESKTOP WALLPAPER" if self.desktop_mode else "WINDOW"
         print("\n" + "=" * 50)
         print("  WallPaper Engine v1.0")
-        print("  Animated Wallpapers with Music")
+        print(f"  Mode: {mode_str} ({self.width}x{self.height})")
         print("=" * 50)
         print("\nControls:")
         print("  SPACE  - Play/Pause    N/P - Next/Prev track")
         print("  +/-    - Volume        E   - Effects menu")
-        print("  F      - Fullscreen    H   - Toggle HUD")
+        if not self.desktop_mode:
+            print("  F      - Fullscreen    H   - Toggle HUD")
+        else:
+            print("  H      - Toggle HUD")
         print("  1-5    - Quick effect   Q  - Quit")
         print("=" * 50 + "\n")
 
@@ -158,7 +209,7 @@ class WallpaperEngine:
             if event.type == pygame.KEYDOWN:
                 self._handle_keydown(event.key)
 
-            if event.type == pygame.VIDEORESIZE:
+            if event.type == pygame.VIDEORESIZE and not self.desktop_mode:
                 self._handle_resize(event.w, event.h)
 
             # Any mouse or key activity shows HUD
@@ -204,7 +255,7 @@ class WallpaperEngine:
                 self.hud.opacity = 255
                 self.hud.activity()
 
-        elif key == pygame.K_f:
+        elif key == pygame.K_f and not self.desktop_mode:
             self._toggle_fullscreen()
 
         elif key == pygame.K_l:
@@ -220,8 +271,8 @@ class WallpaperEngine:
                 self.hud.activity()
 
     def _toggle_fullscreen(self):
-        """Toggle between fullscreen and windowed mode."""
-        self.fullscreen = not self.fullscreen
+        """Toggle between fullscreen and windowed mode (window mode only)."""
+        self.fullscreen = not getattr(self, "fullscreen", False)
         if self.fullscreen:
             info = pygame.display.Info()
             self.width, self.height = info.current_w, info.current_h
@@ -254,8 +305,6 @@ class WallpaperEngine:
     def _open_file_dialog(self):
         """Simple file path input via terminal."""
         print("\nEnter wallpaper file path (or press Enter to cancel): ", end="", flush=True)
-        # Note: In a full app this would use a proper file dialog (tkinter, etc.)
-        # For now, wallpapers can be specified via --wallpaper flag
 
     def _update(self):
         """Update game state."""
@@ -263,7 +312,6 @@ class WallpaperEngine:
 
     def _render(self):
         """Render everything."""
-        # Clear screen
         self.screen.fill((0, 0, 0))
 
         # Get audio level for reactive visuals
@@ -291,6 +339,13 @@ class WallpaperEngine:
 
     def _cleanup(self):
         """Clean shutdown."""
+        # Detach from desktop if we were embedded
+        if self.desktop_mode and self.pygame_hwnd:
+            try:
+                from wallpaper_engine.desktop import detach_pygame_window
+                detach_pygame_window(self.pygame_hwnd)
+            except Exception:
+                pass
         self.music.cleanup()
         pygame.quit()
 
