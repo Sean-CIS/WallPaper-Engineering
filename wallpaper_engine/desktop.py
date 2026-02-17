@@ -27,6 +27,17 @@ if sys.platform != "win32":
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 
+# Make this process DPI-aware so we get real physical pixel sizes
+# instead of logical (scaled) sizes. Must be called BEFORE any
+# GetSystemMetrics / GetWindowRect calls.
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+except Exception:
+    try:
+        user32.SetProcessDPIAware()  # Fallback for older Windows
+    except Exception:
+        pass
+
 # Detect 64-bit Python (need SetWindowLongPtrW on 64-bit)
 _is_64bit = struct.calcsize("P") == 8
 
@@ -114,29 +125,21 @@ def _find_wallpaper_worker_w():
     return found[0]
 
 
-def embed_pygame_window(pygame_hwnd):
+def find_worker_w():
     """
-    Embed a pygame window as the desktop wallpaper behind icons.
+    Find (or create) the WorkerW window that sits behind the desktop icons.
 
-    Strategy:
-      1. Send 0x052C to Progman to spawn the WorkerW layering.
-      2. Find the empty WorkerW that sits below icons, above Progman.
-      3. Parent our pygame window into that WorkerW.
+    Sends the undocumented 0x052C message to Progman to spawn the WorkerW,
+    then enumerates windows to find it. Retries a few times if needed since
+    the WorkerW doesn't always appear instantly.
 
-    No windows need to be hidden — the empty WorkerW is already
-    positioned correctly in the Z-order.
-
-    Args:
-        pygame_hwnd: The HWND of the pygame window (from pygame.display.get_wm_info).
-
-    Returns:
-        True on success, False on failure.
+    Returns the HWND of the target WorkerW, or None on failure.
     """
     # Step 1: Find Progman
     progman = user32.FindWindowW("Progman", None)
     if not progman:
         print("[desktop] ERROR: Could not find Progman window")
-        return False
+        return None
 
     # Step 2: Send the undocumented 0x052C message to spawn WorkerW
     # Send it twice — some Windows versions need that
@@ -144,7 +147,8 @@ def embed_pygame_window(pygame_hwnd):
     SendMessageTimeoutW(progman, 0x052C, 0xD, 0, SMTO_NORMAL, 1000, ctypes.byref(result))
     SendMessageTimeoutW(progman, 0x052C, 0xD, 1, SMTO_NORMAL, 1000, ctypes.byref(result))
 
-    # Step 3: Find the empty WorkerW (retry — can take a moment to appear)
+    # Step 3: Enumerate windows to find the right WorkerW
+    # Retry a few times — WorkerW can take a moment to appear
     worker_w = None
     for attempt in range(5):
         worker_w = _find_wallpaper_worker_w()
@@ -153,10 +157,47 @@ def embed_pygame_window(pygame_hwnd):
         time.sleep(0.2)
 
     if not worker_w:
-        print("[desktop] ERROR: Could not find WorkerW after retries")
+        print("[desktop] ERROR: Could not find WorkerW window after retries")
+        return None
+
+    return worker_w
+
+
+def get_worker_w_size():
+    """
+    Find the WorkerW and return its (hwnd, width, height) in physical pixels.
+    Returns (None, 0, 0) if WorkerW can't be found.
+    """
+    worker_w = find_worker_w()
+    if not worker_w:
+        return None, 0, 0
+    rect = wintypes.RECT()
+    user32.GetWindowRect(worker_w, ctypes.byref(rect))
+    w = rect.right - rect.left
+    h = rect.bottom - rect.top
+    return worker_w, w, h
+
+
+def embed_pygame_window(pygame_hwnd, worker_w, width, height):
+    """
+    Embed a pygame window as the desktop wallpaper behind icons.
+
+    No windows need to be hidden — the empty WorkerW is already
+    positioned correctly in the Z-order.
+
+    Args:
+        pygame_hwnd: The HWND of the pygame window.
+        worker_w: The HWND of the target WorkerW.
+        width: Physical pixel width of the WorkerW.
+        height: Physical pixel height of the WorkerW.
+
+    Returns:
+        True on success, False on failure.
+    """
+    if not worker_w:
         return False
 
-    # Step 4: Strip window chrome — we want a bare frameless surface
+    # Strip window chrome — we want a bare frameless surface
     style = _get_window_long(pygame_hwnd, GWLP_STYLE)
     style &= ~(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_POPUP)
     style |= WS_CHILD | WS_VISIBLE
@@ -169,20 +210,19 @@ def embed_pygame_window(pygame_hwnd):
     ex_style |= WS_EX_TOOLWINDOW
     _set_window_long(pygame_hwnd, GWLP_EXSTYLE, ex_style)
 
-    # Step 5: Parent into the empty WorkerW (behind icons, above wallpaper)
+    # Parent into the empty WorkerW (behind icons, above wallpaper)
     user32.SetParent(pygame_hwnd, worker_w)
 
-    # Step 6: Resize to fill the desktop using actual monitor size
-    w = user32.GetSystemMetrics(0)  # SM_CXSCREEN
-    h = user32.GetSystemMetrics(1)  # SM_CYSCREEN
-    user32.SetWindowPos(pygame_hwnd, None, 0, 0, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+    # Resize to fill the desktop
+    user32.SetWindowPos(pygame_hwnd, None, 0, 0, width, height,
+                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW)
 
-    print(f"[desktop] Embedded into WorkerW ({w}x{h})")
+    print(f"[desktop] Embedded into WorkerW ({width}x{height})")
     return True
 
 
 def get_desktop_resolution():
-    """Return (width, height) of the primary monitor."""
+    """Return (width, height) of the primary monitor in physical pixels."""
     return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
 
 
