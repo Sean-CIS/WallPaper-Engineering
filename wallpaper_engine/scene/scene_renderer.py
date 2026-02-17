@@ -47,7 +47,7 @@ class SceneRenderer:
         # Cache: store the last rendered surface to reuse at lower FPS
         self._cached_surface = None
         self._last_render_time = 0
-        self._render_interval = 1.0 / 24  # Render effects at 24 FPS for perf
+        self._render_interval = 1.0 / 30  # Match target FPS
 
     def load(self):
         """Load and compile everything from the PKG."""
