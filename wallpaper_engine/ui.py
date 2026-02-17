@@ -33,8 +33,11 @@ class HUD:
         self.font_small = pygame.font.SysFont("Arial", 14)
 
         # Clock fonts — big and readable on the desktop
-        self.font_clock_time = pygame.font.SysFont("Segoe UI Light", 72)
-        self.font_clock_date = pygame.font.SysFont("Segoe UI", 24)
+        # pygame wants lowercase no-space names: "segoeui", "segoeuisemilight"
+        self.font_clock_time = pygame.font.SysFont("segoeuisemilight", 72)
+        if not self.font_clock_time:
+            self.font_clock_time = pygame.font.SysFont("segoeui", 72)
+        self.font_clock_date = pygame.font.SysFont("segoeui", 24)
 
         # Visualizer bars
         self.bar_count = 40

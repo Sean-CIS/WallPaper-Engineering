@@ -15,6 +15,7 @@ How it works:
 """
 
 import sys
+import time
 import ctypes
 import ctypes.wintypes as wintypes
 
@@ -52,28 +53,38 @@ SendMessageTimeoutW.argtypes = [
 
 EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
-_worker_w = None
 
+def _find_worker_w_enum():
+    """
+    Enumerate all top-level windows to find the WorkerW that contains
+    a SHELLDLL_DefView child — then grab the WorkerW *after* it.
+    """
+    found = [None]
 
-def _enum_callback(hwnd, lparam):
-    """Callback for EnumWindows — find the WorkerW that has a SHELLDLL_DefView child."""
-    global _worker_w
-    shell_view = user32.FindWindowExW(hwnd, None, "SHELLDLL_DefView", None)
-    if shell_view:
-        # The WorkerW we want is the one *after* this one
-        _worker_w = user32.FindWindowExW(None, hwnd, "WorkerW", None)
-    return True  # keep enumerating
+    def callback(hwnd, lparam):
+        shell_view = user32.FindWindowExW(hwnd, None, "SHELLDLL_DefView", None)
+        if shell_view:
+            # The WorkerW we want is the NEXT sibling after this one
+            found[0] = user32.FindWindowExW(None, hwnd, "WorkerW", None)
+        return True  # keep enumerating
+
+    # IMPORTANT: store the callback in a variable so it doesn't get
+    # garbage-collected while EnumWindows is still calling it
+    cb = EnumWindowsProc(callback)
+    user32.EnumWindows(cb, 0)
+    return found[0]
 
 
 def find_worker_w():
     """
     Find (or create) the WorkerW window that sits behind the desktop icons.
 
+    Sends the undocumented 0x052C message to Progman to spawn the WorkerW,
+    then enumerates windows to find it. Retries a few times if needed since
+    the WorkerW doesn't always appear instantly.
+
     Returns the HWND of the target WorkerW, or None on failure.
     """
-    global _worker_w
-    _worker_w = None
-
     # Step 1: Find Progman
     progman = user32.FindWindowW("Progman", None)
     if not progman:
@@ -81,17 +92,30 @@ def find_worker_w():
         return None
 
     # Step 2: Send the undocumented 0x052C message to spawn WorkerW
+    # Send it twice — some Windows versions need that
     result = wintypes.DWORD(0)
-    SendMessageTimeoutW(progman, 0x052C, 0, 0, SMTO_NORMAL, 1000, ctypes.byref(result))
+    SendMessageTimeoutW(progman, 0x052C, 0xD, 0, SMTO_NORMAL, 1000, ctypes.byref(result))
+    SendMessageTimeoutW(progman, 0x052C, 0xD, 1, SMTO_NORMAL, 1000, ctypes.byref(result))
 
     # Step 3: Enumerate windows to find the right WorkerW
-    user32.EnumWindows(EnumWindowsProc(_enum_callback), 0)
+    # Retry a few times — WorkerW can take a moment to appear
+    worker_w = None
+    for attempt in range(5):
+        worker_w = _find_worker_w_enum()
+        if worker_w:
+            break
+        time.sleep(0.2)
 
-    if not _worker_w:
-        print("[desktop] ERROR: Could not find WorkerW window")
+    if not worker_w:
+        # Fallback: try sending Progman to the bottom and rendering directly
+        # into Progman's first WorkerW child
+        worker_w = user32.FindWindowExW(progman, None, "WorkerW", None)
+
+    if not worker_w:
+        print("[desktop] ERROR: Could not find WorkerW window after retries")
         return None
 
-    return _worker_w
+    return worker_w
 
 
 def embed_pygame_window(pygame_hwnd):
