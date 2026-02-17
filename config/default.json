@@ -1,0 +1,23 @@
+{
+    "window": {
+        "width": 1280,
+        "height": 720,
+        "fullscreen": false,
+        "fps": 30
+    },
+    "wallpaper": {
+        "default_effect": "aurora",
+        "wallpaper_path": null
+    },
+    "audio": {
+        "music_folder": "assets/music",
+        "volume": 0.7,
+        "auto_play": true
+    },
+    "hud": {
+        "visible": true,
+        "auto_hide_seconds": 4,
+        "show_fps": true,
+        "visualizer_bars": 40
+    }
+}
