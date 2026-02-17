@@ -16,6 +16,7 @@ How it works:
 
 import sys
 import time
+import struct
 import ctypes
 import ctypes.wintypes as wintypes
 
@@ -26,9 +27,12 @@ if sys.platform != "win32":
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 
+# Detect 64-bit Python (need SetWindowLongPtrW on 64-bit)
+_is_64bit = struct.calcsize("P") == 8
+
 # Win32 constants
-GWL_STYLE = -16
-GWL_EXSTYLE = -20
+GWLP_STYLE = -16
+GWLP_EXSTYLE = -20
 WS_CHILD = 0x40000000
 WS_POPUP = 0x80000000
 WS_VISIBLE = 0x10000000
@@ -52,6 +56,30 @@ SendMessageTimeoutW.argtypes = [
 ]
 
 EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+
+def _get_window_long(hwnd, index):
+    """Get window long value — uses Ptr variant on 64-bit."""
+    if _is_64bit:
+        user32.GetWindowLongPtrW.restype = ctypes.c_long_long
+        user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+        return user32.GetWindowLongPtrW(hwnd, index)
+    else:
+        user32.GetWindowLongW.restype = wintypes.LONG
+        user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+        return user32.GetWindowLongW(hwnd, index)
+
+
+def _set_window_long(hwnd, index, value):
+    """Set window long value — uses Ptr variant on 64-bit."""
+    if _is_64bit:
+        user32.SetWindowLongPtrW.restype = ctypes.c_long_long
+        user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long_long]
+        return user32.SetWindowLongPtrW(hwnd, index, value)
+    else:
+        user32.SetWindowLongW.restype = wintypes.LONG
+        user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.LONG]
+        return user32.SetWindowLongW(hwnd, index, value)
 
 
 def _find_worker_w_enum():
@@ -107,8 +135,7 @@ def find_worker_w():
         time.sleep(0.2)
 
     if not worker_w:
-        # Fallback: try sending Progman to the bottom and rendering directly
-        # into Progman's first WorkerW child
+        # Fallback: try rendering directly into Progman's first WorkerW child
         worker_w = user32.FindWindowExW(progman, None, "WorkerW", None)
 
     if not worker_w:
@@ -133,15 +160,15 @@ def embed_pygame_window(pygame_hwnd):
         return False
 
     # Strip window chrome — we want a bare frameless surface
-    style = user32.GetWindowLongW(pygame_hwnd, GWL_STYLE)
+    style = _get_window_long(pygame_hwnd, GWLP_STYLE)
     style &= ~(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_POPUP)
     style |= WS_CHILD | WS_VISIBLE
-    user32.SetWindowLongW(pygame_hwnd, GWL_STYLE, style)
+    _set_window_long(pygame_hwnd, GWLP_STYLE, style)
 
     # Remove tool-window extended style
-    ex_style = user32.GetWindowLongW(pygame_hwnd, GWL_EXSTYLE)
+    ex_style = _get_window_long(pygame_hwnd, GWLP_EXSTYLE)
     ex_style |= WS_EX_TOOLWINDOW
-    user32.SetWindowLongW(pygame_hwnd, GWL_EXSTYLE, ex_style)
+    _set_window_long(pygame_hwnd, GWLP_EXSTYLE, ex_style)
 
     # Re-parent into the WorkerW
     user32.SetParent(pygame_hwnd, worker_w)
@@ -169,7 +196,7 @@ def detach_pygame_window(pygame_hwnd):
     desktop = user32.GetDesktopWindow()
     user32.SetParent(pygame_hwnd, desktop)
 
-    style = user32.GetWindowLongW(pygame_hwnd, GWL_STYLE)
+    style = _get_window_long(pygame_hwnd, GWLP_STYLE)
     style &= ~WS_CHILD
     style |= WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME
-    user32.SetWindowLongW(pygame_hwnd, GWL_STYLE, style)
+    _set_window_long(pygame_hwnd, GWLP_STYLE, style)
