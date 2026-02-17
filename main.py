@@ -6,12 +6,17 @@ A Python-based animated wallpaper that renders BEHIND your desktop icons,
 just like Wallpaper Engine. On Windows it uses the Win32 WorkerW trick
 to embed the pygame surface into the desktop layer.
 
+Features a clock widget, dual-layer audio (ambient + music playing
+simultaneously), and audio-reactive procedural effects.
+
 Controls:
     SPACE       - Play / Pause music
     N           - Next track
     P           - Previous track
     + / =       - Volume up
     - / _       - Volume down
+    A           - Toggle ambient sound
+    C           - Toggle clock display
     E           - Open effects menu
     1-5         - Quick select effect
     H           - Toggle HUD overlay
@@ -20,7 +25,7 @@ Controls:
 Usage:
     python main.py                          # Desktop wallpaper (default)
     python main.py --window                 # Regular foreground window
-    python main.py --wallpaper path.gif     # Desktop wallpaper with a GIF
+    python main.py --ambient ocean.ogg      # Layer an ambient sound under music
     python main.py --effect aurora          # Desktop wallpaper with aurora effect
 """
 
@@ -50,6 +55,7 @@ Examples:
   python main.py                              # Desktop wallpaper mode (default)
   python main.py --window                     # Regular window mode
   python main.py --effect matrix              # Matrix rain on desktop
+  python main.py --ambient ocean_waves.ogg    # Layer ambient under music
   python main.py --wallpaper scene.gif        # GIF on desktop
   python main.py --window --width 1280 --height 720   # Windowed at custom size
         """
@@ -58,6 +64,12 @@ Examples:
                         help="Path to wallpaper file (GIF, PNG, JPG)")
     parser.add_argument("--music", "-m", type=str, default="assets/music",
                         help="Path to music folder (default: assets/music)")
+    parser.add_argument("--ambient", "-a", type=str, default=None,
+                        help="Path to ambient sound file (loops under music)")
+    parser.add_argument("--ambient-dir", type=str, default="assets/ambient",
+                        help="Folder to auto-scan for ambient sounds (default: assets/ambient)")
+    parser.add_argument("--ambient-volume", type=float, default=0.5,
+                        help="Ambient volume 0.0-1.0 (default: 0.5)")
     parser.add_argument("--effect", "-e", type=str, default="aurora",
                         choices=["wave", "aurora", "particles", "gradient_pulse", "matrix"],
                         help="Procedural effect to use (default: aurora)")
@@ -73,6 +85,8 @@ Examples:
                         help="Fullscreen window (only in --window mode)")
     parser.add_argument("--no-hud", action="store_true",
                         help="Start with HUD hidden")
+    parser.add_argument("--no-clock", action="store_true",
+                        help="Start with the clock hidden")
     return parser.parse_args()
 
 
@@ -125,9 +139,19 @@ class WallpaperEngine:
         music_dir = os.path.abspath(args.music)
         self.music.scan_music_folder(music_dir)
 
-        # HUD visibility
+        # Load ambient sound — explicit file takes priority, else scan folder
+        self.music.set_ambient_volume(args.ambient_volume)
+        if args.ambient:
+            self.music.load_ambient(os.path.abspath(args.ambient))
+        else:
+            ambient_dir = os.path.abspath(args.ambient_dir)
+            self.music.scan_ambient_folder(ambient_dir)
+
+        # HUD / clock visibility
         if args.no_hud:
             self.hud.visible = False
+        if args.no_clock:
+            self.hud.show_clock = False
 
         self.running = True
 
@@ -176,7 +200,8 @@ class WallpaperEngine:
         print("=" * 50)
         print("\nControls:")
         print("  SPACE  - Play/Pause    N/P - Next/Prev track")
-        print("  +/-    - Volume        E   - Effects menu")
+        print("  +/-    - Volume        A   - Toggle ambient")
+        print("  C      - Toggle clock  E   - Effects menu")
         if not self.desktop_mode:
             print("  F      - Fullscreen    H   - Toggle HUD")
         else:
@@ -187,6 +212,10 @@ class WallpaperEngine:
         # Auto-play music if available
         if self.music.playlist:
             self.music.play()
+
+        # Auto-play ambient if loaded
+        if self.music.ambient_sound:
+            self.music.play_ambient()
 
         while self.running:
             self._handle_events()
@@ -242,6 +271,12 @@ class WallpaperEngine:
 
         elif key in (pygame.K_MINUS, pygame.K_UNDERSCORE, pygame.K_KP_MINUS):
             self.music.volume_down()
+
+        elif key == pygame.K_a:
+            self.music.toggle_ambient()
+
+        elif key == pygame.K_c:
+            self.hud.toggle_clock()
 
         elif key == pygame.K_e:
             self.hud.toggle_effects_menu()
@@ -320,7 +355,7 @@ class WallpaperEngine:
         # Render wallpaper/effect
         self.renderer.render(audio_level)
 
-        # Render HUD overlay
+        # Render HUD overlay (includes clock)
         track_info = self.music.get_track_info()
         fps = self.clock.get_fps()
         hud_surface = self.hud.render(

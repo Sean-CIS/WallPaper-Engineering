@@ -2,12 +2,13 @@
 HUD / overlay UI for the wallpaper engine.
 
 Renders on-screen controls, track info, visualizer bars,
-and effect selection overlay.
+clock/date widget, and effect selection overlay.
 """
 
 import math
 import time
 import pygame
+from datetime import datetime
 
 
 class HUD:
@@ -22,11 +23,18 @@ class HUD:
         self.opacity = 255
         self.fade_speed = 5
 
+        # Clock is always visible (independent of HUD fade)
+        self.show_clock = True
+
         # Fonts
         pygame.font.init()
         self.font_large = pygame.font.SysFont("Arial", 28, bold=True)
         self.font_medium = pygame.font.SysFont("Arial", 20)
         self.font_small = pygame.font.SysFont("Arial", 14)
+
+        # Clock fonts — big and readable on the desktop
+        self.font_clock_time = pygame.font.SysFont("Segoe UI Light", 72)
+        self.font_clock_date = pygame.font.SysFont("Segoe UI", 24)
 
         # Visualizer bars
         self.bar_count = 40
@@ -54,6 +62,10 @@ class HUD:
         self.show_effects_menu = not self.show_effects_menu
         self.activity()
 
+    def toggle_clock(self):
+        """Toggle the clock display."""
+        self.show_clock = not self.show_clock
+
     def render(self, track_info, volume, is_playing, is_paused, audio_level,
                current_effect, fps):
         """Render the full HUD overlay. Returns a surface to blit."""
@@ -66,10 +78,15 @@ class HUD:
             if self.opacity == 0:
                 self.visible = False
 
-        if not self.visible and not self.show_effects_menu:
-            return None
-
+        # Even if HUD is hidden, we still need the overlay for the clock
         overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+
+        # Clock is always rendered (doesn't fade with HUD)
+        if self.show_clock:
+            self._render_clock(overlay)
+
+        if not self.visible and not self.show_effects_menu:
+            return overlay
 
         alpha = self.opacity
 
@@ -103,6 +120,46 @@ class HUD:
             self._render_effects_menu(overlay)
 
         return overlay
+
+    def _render_clock(self, surface):
+        """Render date and time widget — always visible, bottom-right above the HUD bar."""
+        now = datetime.now()
+
+        time_str = now.strftime("%I:%M")  # e.g. "02:34"
+        ampm_str = now.strftime(" %p")    # e.g. " PM"
+        date_str = now.strftime("%A, %B %d, %Y")  # e.g. "Monday, February 17, 2026"
+
+        # Render time text
+        time_surf = self.font_clock_time.render(time_str, True, (255, 255, 255, 240))
+        ampm_surf = self.font_clock_date.render(ampm_str, True, (200, 200, 200, 200))
+        date_surf = self.font_clock_date.render(date_str, True, (200, 200, 200, 200))
+
+        # Position: bottom-right, above the HUD bar area
+        margin_right = 40
+        margin_bottom = 140  # above the 120px HUD bar
+
+        time_x = self.width - time_surf.get_width() - ampm_surf.get_width() - margin_right
+        time_y = self.height - margin_bottom - time_surf.get_height() - date_surf.get_height() - 5
+
+        # Semi-transparent backdrop behind the clock for readability
+        backdrop_w = max(time_surf.get_width() + ampm_surf.get_width(), date_surf.get_width()) + 30
+        backdrop_h = time_surf.get_height() + date_surf.get_height() + 20
+        backdrop_x = self.width - backdrop_w - margin_right + 10
+        backdrop_y = time_y - 8
+        pygame.draw.rect(surface, (0, 0, 0, 80),
+                         (backdrop_x, backdrop_y, backdrop_w, backdrop_h),
+                         border_radius=12)
+
+        # Blit time
+        surface.blit(time_surf, (time_x, time_y))
+        # AM/PM next to the time, vertically aligned to bottom of time text
+        ampm_y = time_y + time_surf.get_height() - ampm_surf.get_height() - 8
+        surface.blit(ampm_surf, (time_x + time_surf.get_width() + 2, ampm_y))
+
+        # Blit date below time
+        date_x = self.width - date_surf.get_width() - margin_right
+        date_y = time_y + time_surf.get_height() + 2
+        surface.blit(date_surf, (date_x, date_y))
 
     def _render_visualizer(self, surface, audio_level, alpha):
         """Render audio visualizer bars."""
