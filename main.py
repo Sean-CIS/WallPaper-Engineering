@@ -157,11 +157,20 @@ class WallpaperEngine:
 
     def _init_desktop_mode(self):
         """Set up the window and embed it as the desktop wallpaper."""
-        from wallpaper_engine.desktop import get_desktop_resolution, embed_pygame_window
+        from wallpaper_engine.desktop import get_worker_w_size, embed_pygame_window
 
-        self.width, self.height = get_desktop_resolution()
+        # Get the actual WorkerW size in physical pixels (DPI-aware)
+        self._worker_w, ww_width, ww_height = get_worker_w_size()
 
-        # Create a borderless window at desktop resolution
+        if not self._worker_w:
+            print("[wallpaper] WARNING: Could not find WorkerW, falling back to window")
+            self._init_window_mode(1920, 1080)
+            return
+
+        # Use the WorkerW's real physical pixel size
+        self.width, self.height = ww_width, ww_height
+
+        # Create a borderless window at the WorkerW's real resolution
         os.environ["SDL_VIDEO_WINDOW_POS"] = "0,0"
         flags = pygame.NOFRAME | pygame.DOUBLEBUF | pygame.HWSURFACE
         self.screen = pygame.display.set_mode((self.width, self.height), flags)
@@ -170,7 +179,8 @@ class WallpaperEngine:
         wm_info = pygame.display.get_wm_info()
         self.pygame_hwnd = wm_info.get("window")
 
-        if self.pygame_hwnd and embed_pygame_window(self.pygame_hwnd):
+        if self.pygame_hwnd and embed_pygame_window(self.pygame_hwnd, self._worker_w,
+                                                     self.width, self.height):
             self.desktop_mode = True
             print(f"[wallpaper] Desktop mode active ({self.width}x{self.height})")
         else:

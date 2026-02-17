@@ -27,6 +27,17 @@ if sys.platform != "win32":
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 
+# Make this process DPI-aware so we get real physical pixel sizes
+# instead of logical (scaled) sizes. Must be called BEFORE any
+# GetSystemMetrics / GetWindowRect calls.
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+except Exception:
+    try:
+        user32.SetProcessDPIAware()  # Fallback for older Windows
+    except Exception:
+        pass
+
 # Detect 64-bit Python (need SetWindowLongPtrW on 64-bit)
 _is_64bit = struct.calcsize("P") == 8
 
@@ -145,17 +156,34 @@ def find_worker_w():
     return worker_w
 
 
-def embed_pygame_window(pygame_hwnd):
+def get_worker_w_size():
+    """
+    Find the WorkerW and return its (hwnd, width, height) in physical pixels.
+    Returns (None, 0, 0) if WorkerW can't be found.
+    """
+    worker_w = find_worker_w()
+    if not worker_w:
+        return None, 0, 0
+    rect = wintypes.RECT()
+    user32.GetWindowRect(worker_w, ctypes.byref(rect))
+    w = rect.right - rect.left
+    h = rect.bottom - rect.top
+    return worker_w, w, h
+
+
+def embed_pygame_window(pygame_hwnd, worker_w, width, height):
     """
     Embed a pygame window into the desktop WorkerW layer.
 
     Args:
-        pygame_hwnd: The HWND of the pygame window (from pygame.display.get_wm_info).
+        pygame_hwnd: The HWND of the pygame window.
+        worker_w: The HWND of the target WorkerW.
+        width: Physical pixel width of the WorkerW.
+        height: Physical pixel height of the WorkerW.
 
     Returns:
         True on success, False on failure.
     """
-    worker_w = find_worker_w()
     if not worker_w:
         return False
 
@@ -174,18 +202,15 @@ def embed_pygame_window(pygame_hwnd):
     user32.SetParent(pygame_hwnd, worker_w)
 
     # Resize to fill the desktop
-    rect = wintypes.RECT()
-    user32.GetWindowRect(worker_w, ctypes.byref(rect))
-    w = rect.right - rect.left
-    h = rect.bottom - rect.top
-    user32.SetWindowPos(pygame_hwnd, None, 0, 0, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+    user32.SetWindowPos(pygame_hwnd, None, 0, 0, width, height,
+                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW)
 
-    print(f"[desktop] Embedded into desktop ({w}x{h})")
+    print(f"[desktop] Embedded into desktop ({width}x{height})")
     return True
 
 
 def get_desktop_resolution():
-    """Return (width, height) of the primary monitor."""
+    """Return (width, height) of the primary monitor in physical pixels."""
     return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
 
 
