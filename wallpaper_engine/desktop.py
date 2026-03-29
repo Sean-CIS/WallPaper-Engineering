@@ -8,10 +8,23 @@ Wallpaper Engine and Lively Wallpaper.
 How it works:
   1. Find the "Progman" window (the shell desktop).
   2. Send it message 0x052C to spawn a WorkerW layer.
-  3. Enumerate top-level windows to find the empty WorkerW that sits
-     below the icon layer but above Progman's static wallpaper.
-  4. Re-parent our pygame window into that WorkerW so it renders
-     behind desktop icons but above the static wallpaper.
+  3. Detect the desktop layout:
+
+     Layout A (Win10, some Win11):
+         Top-level WorkerW  (contains SHELLDLL_DefView — icons)
+         Top-level WorkerW  (empty — our target, below icons)
+         Progman            (bottom)
+       → Parent into the empty top-level WorkerW.
+
+     Layout B (Win11 24H2+):
+         Progman
+           ├── SHELLDLL_DefView  (icons)
+           └── WorkerW           (static wallpaper)
+       → Parent into Progman directly, position below icons,
+         and HIDE the WorkerW to stop the static wallpaper from
+         painting over our content.
+
+  4. Re-parent our pygame window so it renders behind desktop icons.
 """
 
 import sys
@@ -44,6 +57,8 @@ _is_64bit = struct.calcsize("P") == 8
 # Win32 constants
 GWLP_STYLE = -16
 GWLP_EXSTYLE = -20
+GW_CHILD = 5
+GW_HWNDNEXT = 2
 WS_CHILD = 0x40000000
 WS_POPUP = 0x80000000
 WS_VISIBLE = 0x10000000
@@ -57,6 +72,8 @@ SWP_NOACTIVATE = 0x0010
 SWP_NOZORDER = 0x0004
 SWP_SHOWWINDOW = 0x0040
 SMTO_NORMAL = 0x0000
+SW_HIDE = 0
+SW_SHOW = 5
 
 # Function signatures
 SendMessageTimeoutW = user32.SendMessageTimeoutW
@@ -67,6 +84,10 @@ SendMessageTimeoutW.argtypes = [
 ]
 
 EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+# Module-level state for cleanup
+_hidden_worker_w = None  # WorkerW we hid in Layout B (must restore on exit)
+_embed_layout = None      # "A" or "B"
 
 
 def _get_window_long(hwnd, index):
@@ -93,118 +114,136 @@ def _set_window_long(hwnd, index, value):
         return user32.SetWindowLongW(hwnd, index, value)
 
 
-def _find_wallpaper_worker_w():
+def _get_class_name(hwnd):
+    """Get the window class name."""
+    buf = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(hwnd, buf, 256)
+    return buf.value
+
+
+def _detect_layout():
     """
-    Find the WorkerW we should parent into.
+    Detect which desktop layout is active and return the embed target.
 
-    There are two known desktop layouts depending on Windows version:
-
-    Layout A (Win10, some Win11):
-        Top-level WorkerW  (contains SHELLDLL_DefView — icons)
-        Top-level WorkerW  (empty — our target, below icons)
-        Progman            (bottom)
-
-    Layout B (Win11 24H2+):
-        Progman
-          ├── SHELLDLL_DefView  (icons — stays inside Progman)
-          └── WorkerW           (our target — child of Progman)
-
-    We try Layout A first (EnumWindows for top-level sibling), then
-    fall back to Layout B (WorkerW child of Progman).
+    Returns:
+        ("A", worker_w_hwnd):  Layout A — target is a top-level empty WorkerW
+        ("B", progman_hwnd, sdv_hwnd, worker_w_hwnd):
+                               Layout B — target is Progman; SDV and WorkerW are children
+        (None,):               Could not detect layout
     """
-    # --- Layout A: top-level sibling ---
-    found = [None]
+    progman = user32.FindWindowW("Progman", None)
+    if not progman:
+        return (None,)
+
+    # --- Layout A: SHELLDLL_DefView inside a top-level WorkerW ---
+    found_a = [None]
 
     def callback(hwnd, lparam):
         shell_view = user32.FindWindowExW(hwnd, None, "SHELLDLL_DefView", None)
         if shell_view:
-            found[0] = user32.FindWindowExW(None, hwnd, "WorkerW", None)
+            # The NEXT top-level WorkerW after this one is our target
+            found_a[0] = user32.FindWindowExW(None, hwnd, "WorkerW", None)
         return True
 
     cb = EnumWindowsProc(callback)
     user32.EnumWindows(cb, 0)
 
-    if found[0]:
-        return found[0]
+    if found_a[0]:
+        return ("A", found_a[0])
 
-    # --- Layout B: WorkerW is a child of Progman ---
-    progman = user32.FindWindowW("Progman", None)
-    if progman:
-        worker_w = user32.FindWindowExW(progman, None, "WorkerW", None)
-        if worker_w:
-            return worker_w
+    # --- Layout B: SHELLDLL_DefView is a direct child of Progman ---
+    sdv = user32.FindWindowExW(progman, None, "SHELLDLL_DefView", None)
+    worker_w = user32.FindWindowExW(progman, None, "WorkerW", None)
 
-    return None
+    if sdv and worker_w:
+        return ("B", progman, sdv, worker_w)
+
+    # Fallback: just a WorkerW child of Progman, no SDV found yet
+    if worker_w:
+        return ("B", progman, None, worker_w)
+
+    return (None,)
 
 
 def find_worker_w():
     """
-    Find (or create) the WorkerW window that sits behind the desktop icons.
+    Find (or create) the desktop embed target.
 
     Sends the undocumented 0x052C message to Progman to spawn the WorkerW,
-    then searches for it using both known Windows layouts. Retries a few
-    times if needed since the WorkerW doesn't always appear instantly.
+    then detects the layout. Retries a few times since WorkerW doesn't
+    always appear instantly.
 
-    Returns the HWND of the target WorkerW, or None on failure.
+    Returns the target HWND (WorkerW for Layout A, Progman for Layout B),
+    or None on failure.
     """
+    global _embed_layout
+
     progman = user32.FindWindowW("Progman", None)
     if not progman:
         print("[desktop] ERROR: Could not find Progman window")
         return None
 
     # Send the undocumented 0x052C message to spawn WorkerW
-    # Send it twice — some Windows versions need that
     result = wintypes.DWORD(0)
     SendMessageTimeoutW(progman, 0x052C, 0xD, 0, SMTO_NORMAL, 1000, ctypes.byref(result))
     SendMessageTimeoutW(progman, 0x052C, 0xD, 1, SMTO_NORMAL, 1000, ctypes.byref(result))
 
     # Retry a few times — WorkerW can take a moment to appear
-    worker_w = None
+    layout = (None,)
     for attempt in range(5):
-        worker_w = _find_wallpaper_worker_w()
-        if worker_w:
+        layout = _detect_layout()
+        if layout[0] is not None:
             break
         time.sleep(0.2)
 
-    if not worker_w:
-        print("[desktop] ERROR: Could not find WorkerW after retries")
+    if layout[0] is None:
+        print("[desktop] ERROR: Could not detect desktop layout after retries")
         return None
 
-    return worker_w
+    _embed_layout = layout[0]
+
+    if layout[0] == "A":
+        print(f"[desktop] Layout A: top-level WorkerW 0x{layout[1]:08x}")
+        return layout[1]
+    else:
+        print(f"[desktop] Layout B (Win11 24H2+): Progman 0x{layout[1]:08x}")
+        return layout[1]
 
 
 def get_worker_w_size():
     """
-    Find the WorkerW and return its (hwnd, width, height) in physical pixels.
-    Returns (None, 0, 0) if WorkerW can't be found.
+    Find the embed target and return its (hwnd, width, height) in physical pixels.
+    Returns (None, 0, 0) if target can't be found.
     """
-    worker_w = find_worker_w()
-    if not worker_w:
+    target = find_worker_w()
+    if not target:
         return None, 0, 0
     rect = wintypes.RECT()
-    user32.GetWindowRect(worker_w, ctypes.byref(rect))
+    user32.GetWindowRect(target, ctypes.byref(rect))
     w = rect.right - rect.left
     h = rect.bottom - rect.top
-    return worker_w, w, h
+    return target, w, h
 
 
-def embed_pygame_window(pygame_hwnd, worker_w, width, height):
+def embed_pygame_window(pygame_hwnd, target_hwnd, width, height):
     """
     Embed a pygame window as the desktop wallpaper behind icons.
 
-    No windows need to be hidden — the empty WorkerW is already
-    positioned correctly in the Z-order.
+    Handles both Layout A and Layout B automatically based on the
+    layout detected during find_worker_w().
 
     Args:
         pygame_hwnd: The HWND of the pygame window.
-        worker_w: The HWND of the target WorkerW.
-        width: Physical pixel width of the WorkerW.
-        height: Physical pixel height of the WorkerW.
+        target_hwnd: The HWND returned by find_worker_w().
+        width: Physical pixel width.
+        height: Physical pixel height.
 
     Returns:
         True on success, False on failure.
     """
-    if not worker_w:
+    global _hidden_worker_w
+
+    if not target_hwnd:
         return False
 
     # Strip window chrome — we want a bare frameless surface
@@ -216,18 +255,41 @@ def embed_pygame_window(pygame_hwnd, worker_w, width, height):
     # Strip extended styles that can interfere with rendering
     ex_style = _get_window_long(pygame_hwnd, GWLP_EXSTYLE)
     ex_style &= ~(0x00020000 | 0x00000200 | 0x00000100 | 0x00080000 | 0x00000001)
-    # WS_EX_DLGMODALFRAME | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE | WS_EX_LAYERED | WS_EX_COMPOSITED
     ex_style |= WS_EX_TOOLWINDOW
     _set_window_long(pygame_hwnd, GWLP_EXSTYLE, ex_style)
 
-    # Parent into the empty WorkerW (behind icons, above wallpaper)
-    user32.SetParent(pygame_hwnd, worker_w)
+    if _embed_layout == "B":
+        # Layout B: parent into Progman, position below icons
+        progman = target_hwnd
+        sdv = user32.FindWindowExW(progman, None, "SHELLDLL_DefView", None)
+        worker_w = user32.FindWindowExW(progman, None, "WorkerW", None)
 
-    # Resize to fill the desktop
-    user32.SetWindowPos(pygame_hwnd, None, 0, 0, width, height,
-                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+        user32.SetParent(pygame_hwnd, progman)
 
-    print(f"[desktop] Embedded into WorkerW ({width}x{height})")
+        # Position our window AFTER SHELLDLL_DefView in Z-order
+        # (below icons but above WorkerW / static wallpaper)
+        if sdv:
+            user32.SetWindowPos(pygame_hwnd, sdv, 0, 0, width, height,
+                                SWP_NOACTIVATE | SWP_SHOWWINDOW)
+        else:
+            user32.SetWindowPos(pygame_hwnd, None, 0, 0, width, height,
+                                SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+
+        # Hide WorkerW to stop Progman from painting the static wallpaper
+        # over our content. We restore it in detach_pygame_window().
+        if worker_w:
+            user32.ShowWindow(worker_w, SW_HIDE)
+            _hidden_worker_w = worker_w
+            print(f"[desktop] Layout B: hid WorkerW 0x{worker_w:08x}")
+
+        print(f"[desktop] Embedded into Progman ({width}x{height})")
+    else:
+        # Layout A: parent into the empty top-level WorkerW
+        user32.SetParent(pygame_hwnd, target_hwnd)
+        user32.SetWindowPos(pygame_hwnd, None, 0, 0, width, height,
+                            SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+        print(f"[desktop] Embedded into WorkerW ({width}x{height})")
+
     return True
 
 
@@ -239,7 +301,16 @@ def get_desktop_resolution():
 def detach_pygame_window(pygame_hwnd):
     """
     Remove the pygame window from the desktop layer (restore to normal window).
+    Also restores any hidden WorkerW from Layout B.
     """
+    global _hidden_worker_w
+
+    # Restore the hidden WorkerW first (Layout B cleanup)
+    if _hidden_worker_w:
+        user32.ShowWindow(_hidden_worker_w, SW_SHOW)
+        print(f"[desktop] Restored WorkerW 0x{_hidden_worker_w:08x}")
+        _hidden_worker_w = None
+
     desktop = user32.GetDesktopWindow()
     user32.SetParent(pygame_hwnd, desktop)
 

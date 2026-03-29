@@ -62,6 +62,8 @@ Examples:
     )
     parser.add_argument("--wallpaper", "-w", type=str, default=None,
                         help="Path to wallpaper file (GIF, PNG, JPG)")
+    parser.add_argument("--scene", "-s", type=str, default=None,
+                        help="Path to Wallpaper Engine scene.pkg file")
     parser.add_argument("--music", "-m", type=str, default="assets/music",
                         help="Path to music folder (default: assets/music)")
     parser.add_argument("--ambient", "-a", type=str, default=None,
@@ -129,23 +131,31 @@ class WallpaperEngine:
         self.music = MusicPlayer()
         self.hud = HUD(self.width, self.height)
 
-        # Load wallpaper if specified
-        if args.wallpaper:
+        # Load wallpaper or scene
+        if args.scene:
+            if not self.renderer.load_scene(args.scene):
+                print("[wallpaper] Scene load failed, falling back to effect")
+                self.renderer.set_effect(args.effect)
+        elif args.wallpaper:
             self.renderer.load_wallpaper(args.wallpaper)
         else:
             self.renderer.set_effect(args.effect)
 
-        # Scan for music
-        music_dir = os.path.abspath(args.music)
-        self.music.scan_music_folder(music_dir)
-
-        # Load ambient sound — explicit file takes priority, else scan folder
-        self.music.set_ambient_volume(args.ambient_volume)
-        if args.ambient:
-            self.music.load_ambient(os.path.abspath(args.ambient))
+        # Load audio from scene or from CLI args
+        if args.scene and self.renderer.scene_renderer:
+            self._load_scene_audio()
         else:
-            ambient_dir = os.path.abspath(args.ambient_dir)
-            self.music.scan_ambient_folder(ambient_dir)
+            # Scan for music
+            music_dir = os.path.abspath(args.music)
+            self.music.scan_music_folder(music_dir)
+
+            # Load ambient sound — explicit file takes priority, else scan folder
+            self.music.set_ambient_volume(args.ambient_volume)
+            if args.ambient:
+                self.music.load_ambient(os.path.abspath(args.ambient))
+            else:
+                ambient_dir = os.path.abspath(args.ambient_dir)
+                self.music.scan_ambient_folder(ambient_dir)
 
         # HUD / clock visibility
         if args.no_hud:
@@ -186,6 +196,23 @@ class WallpaperEngine:
         else:
             print("[wallpaper] WARNING: Desktop embed failed, falling back to borderless window")
             self.desktop_mode = False
+
+    def _load_scene_audio(self):
+        """Load audio extracted from a WE scene into the music player."""
+        audio_info = self.renderer.scene_renderer.get_audio_paths()
+        for info in audio_info:
+            name = info.get("name", "")
+            path = info.get("path", "")
+            volume = info.get("volume", 1.0)
+
+            if "ambien" in name.lower() or "wave" in name.lower() or "ocean" in name.lower():
+                # Treat as ambient
+                self.music.load_ambient(path)
+                self.music.set_ambient_volume(volume)
+            else:
+                # Treat as music
+                self.music.playlist.append(path)
+                self.music.volume = volume
 
     def _init_fullscreen_mode(self):
         """Set up a regular fullscreen window."""
@@ -384,6 +411,9 @@ class WallpaperEngine:
 
     def _cleanup(self):
         """Clean shutdown."""
+        # Clean up scene renderer
+        if self.renderer.scene_renderer:
+            self.renderer.scene_renderer.cleanup()
         # Detach from desktop if we were embedded
         if self.desktop_mode and self.pygame_hwnd:
             try:

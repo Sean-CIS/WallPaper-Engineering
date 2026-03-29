@@ -37,6 +37,9 @@ class WallpaperRenderer:
         self.wallpaper_surface = None
         self.wallpaper_path = None
 
+        # Scene renderer (for WE workshop wallpapers)
+        self.scene_renderer = None
+
         if wallpaper_path:
             self.load_wallpaper(wallpaper_path)
 
@@ -55,6 +58,20 @@ class WallpaperRenderer:
             return self._load_static_image(path)
         else:
             print(f"Unsupported format: {ext}")
+            return False
+
+    def load_scene(self, pkg_path):
+        """Load a Wallpaper Engine scene from a .pkg file."""
+        try:
+            from wallpaper_engine.scene.scene_renderer import SceneRenderer
+            self.scene_renderer = SceneRenderer(pkg_path, self.width, self.height)
+            self.scene_renderer.load()
+            self.effect = "scene"
+            return True
+        except Exception as e:
+            print(f"Error loading scene: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     def _load_gif(self, path):
@@ -113,7 +130,9 @@ class WallpaperRenderer:
         """Render one frame of the current wallpaper/effect."""
         t = time.time() - self.start_time + self.time_offset
 
-        if self.effect == "gif":
+        if self.effect == "scene":
+            self._render_scene()
+        elif self.effect == "gif":
             self._render_gif()
         elif self.effect == "static_parallax":
             self._render_static_parallax(t, audio_level)
@@ -129,6 +148,15 @@ class WallpaperRenderer:
             self._render_matrix(t, audio_level)
         else:
             self._render_wave(t, audio_level)
+
+    def _render_scene(self):
+        """Render a Wallpaper Engine scene."""
+        if self.scene_renderer:
+            surface = self.scene_renderer.render_frame()
+            if surface:
+                if surface.get_size() != (self.width, self.height):
+                    surface = pygame.transform.scale(surface, (self.width, self.height))
+                self.screen.blit(surface, (0, 0))
 
     def _render_gif(self):
         """Render the current GIF frame."""
